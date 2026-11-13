@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -166,19 +167,44 @@ def main():
     (OUT / "admins.txt").write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
     admins = [l.strip() for l in text.split("\n") if l.strip() and not l.strip().startswith("#")]
 
-    # 지금 월드에 나가는 내용을 한눈에 보는 페이지
-    cards = []
+    # 사진 관리 페이지: 액자마다 지금 사진(작은 그림), 번호, 위치, [사진 바꾸기] 버튼(번호가 채워진 이슈 양식)
+    repo = os.environ.get("GITHUB_REPOSITORY", "MissingE/bogo-data")
+    (OUT / "thumbs").mkdir()
+    frames = []
     for s in slots:
-        if any(l.startswith(s["name"] + " ") for l in lines[1:]):
-            n = html.escape(s["name"])
-            cards.append(f'<figure><img src="images/{n}.jpg" loading="lazy" alt="{n}"><figcaption>{n}<br><small>{html.escape(s["label"])}</small></figcaption></figure>')
+        for num in (s["parts"] if "parts" in s else [s["name"]]):
+            cw, ch = (s["w"] // s.get("grid", [5, 2])[0], s["h"] // s.get("grid", [5, 2])[1]) if "parts" in s else (s["w"], s["h"])
+            src = pick(found, num, [])
+            if src is not None:
+                try:
+                    th = fit(open_rgb(src), cw, ch, grow=True)
+                    th.thumbnail((240, 240), Image.LANCZOS)
+                    th.save(OUT / "thumbs" / f"{num}.jpg", "JPEG", quality=80)
+                except Exception:
+                    src = None
+            frames.append((num, s["label"], src is not None))
+    def button(num):
+        q = urllib.parse.urlencode({"template": "photo.yml", "title": f"[사진] {num}번 액자", "frame": num})
+        return f"https://github.com/{repo}/issues/new?{q}"
+    cards = []
+    for num, label, has in frames:
+        img = f'<img src="thumbs/{num}.jpg" loading="lazy" alt="{num}번">' if has else '<div class="none">사진 없음</div>'
+        cards.append(f'<div class="card">{img}<div class="num">{num}번</div><div class="where">{html.escape(label)}</div><a class="btn" href="{html.escape(button(num))}" target="_blank" rel="noopener">사진 바꾸기</a></div>')
     page = f"""<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>보고프구 월드 데이터</title>
-<style>body{{font-family:system-ui,sans-serif;margin:16px;background:#fff6f8;color:#3a2230}}h1{{font-size:20px}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px}}figure{{margin:0;background:#fff;border-radius:10px;padding:8px;box-shadow:0 1px 4px #0002}}
-img{{width:100%;height:140px;object-fit:contain;background:#f9e2dc;border-radius:6px}}figcaption{{font-size:13px;margin-top:6px}}small{{color:#8a6070}}</style>
-<h1>보고프구 월드 데이터</h1><p>관리자 {len(admins)}명 · 사진 {len(lines) - 1}칸 / 전체 {len(slots)}칸</p>
-<p>관리자: {html.escape(", ".join(admins)) if admins else "없음"}</p><div class="grid">{"".join(cards)}</div></html>"""
+<title>보고프구 사진 관리</title>
+<style>body{{font-family:system-ui,"Malgun Gothic",sans-serif;margin:0;background:#fff6f8;color:#3a2230}}
+header{{padding:20px 16px 8px;max-width:1100px;margin:auto}}h1{{font-size:22px;margin:0 0 8px}}p{{margin:6px 0;line-height:1.5}}
+.top{{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}}.btn{{display:inline-block;background:#e0457b;color:#fff;text-decoration:none;border-radius:8px;padding:8px 12px;font-size:14px;text-align:center}}
+.btn.sub{{background:#fff;color:#c2336a;border:1px solid #e0457b}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;padding:8px 16px 24px;max-width:1100px;margin:auto}}
+.card{{background:#fff;border-radius:12px;padding:10px;box-shadow:0 1px 4px #0002;display:flex;flex-direction:column;gap:6px}}
+.card img,.none{{width:100%;height:130px;object-fit:contain;background:#f9e2dc;border-radius:8px}}.none{{display:flex;align-items:center;justify-content:center;color:#a07080;font-size:13px}}
+.num{{font-weight:700;font-size:18px}}.where{{font-size:13px;color:#8a6070;min-height:18px}}</style>
+<header><h1>보고프구 사진 관리</h1>
+<p>바꿀 액자의 <b>사진 바꾸기</b>를 누르고, 열린 화면에 사진을 끌어다 놓은 뒤 <b>Create</b>를 누르세요. 1~2분 뒤 월드에 반영됩니다.</p>
+<p>관리자 {len(admins)}명: {html.escape(", ".join(admins)) if admins else "없음"}</p>
+<div class="top"><a class="btn sub" href="https://github.com/{repo}/edit/main/admins.txt" target="_blank" rel="noopener">관리자 명단 고치기</a></div></header>
+<div class="grid">{"".join(cards)}</div></html>"""
     (OUT / "index.html").write_text(page, encoding="utf-8")
 
     summary = [f"## 월드에 나가는 내용", f"- 관리자 {len(admins)}명: {', '.join(admins) if admins else '없음'}", f"- 사진 {len(lines) - 1}칸 / 전체 {len(slots)}칸 (폴라로이드 10장은 한 칸으로 셉니다)", ""]
