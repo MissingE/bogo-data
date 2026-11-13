@@ -47,6 +47,7 @@
     {"name": "52", "w": 1024, "h": 683, "label": "4번 방", "group": "rooms"},
     {"name": "53", "w": 1024, "h": 683, "label": "5번 방", "group": "rooms"},
     {"name": "54", "w": 683, "h": 1024, "label": "6번 방", "group": "rooms"},
-    {"name": "55", "w": 1280, "h": 720, "label": "스크린 대기 화면", "group": "screen"}
+    {"name": "55", "w": 1280, "h": 720, "label": "스크린 대기 화면", "group": "screen"},
+    {"name": "56", "w": 1280, "h": 720, "label": "월드 규칙", "group": "rules"}
   ]
 }

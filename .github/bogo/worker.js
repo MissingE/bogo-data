@@ -238,7 +238,7 @@ async function frames(env)
     const shape = w > h * 1.1 ? "가로 사진" : h > w * 1.1 ? "세로 사진" : "정사각형 사진";
     for (const n of s.parts || [s.name])
     {
-      out.push({ n, label: s.label, shape, ratio: Math.round((w / h) * 10000) / 10000 });
+      out.push({ n, label: s.label, shape, ratio: Math.round((w / h) * 10000) / 10000, w: Math.round(w), h: Math.round(h) });
     }
   }
   frameCache = out;
@@ -352,7 +352,9 @@ textarea{width:100%;min-height:150px;font-size:15px;line-height:1.5;padding:10px
 .card{background:var(--card);border-radius:12px;padding:10px;box-shadow:0 1px 4px #0001;display:flex;flex-direction:column;gap:6px;border:2px solid transparent}
 .card.over{border-color:var(--pink)}.pic{height:130px;background:#f9e2dc;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden}
 .pic img{display:block;height:auto;object-fit:cover;background:#fff}
-.num{font-weight:700;font-size:18px}.where{font-size:13px;color:var(--soft)}.card .msg{min-height:18px}
+.num{font-weight:700;font-size:18px}.where{font-size:13px;color:var(--soft)}.size{font-size:12px;color:#c2336a}.card .msg{min-height:18px}
+.sizes{margin-bottom:14px}.sizes summary{cursor:pointer;font-weight:600;font-size:15px}.sizes table{width:100%;border-collapse:collapse;font-size:14px;margin-top:8px}
+.sizes th,.sizes td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.sizes th{color:var(--soft);font-weight:600;font-size:13px}.sizes td.px{white-space:nowrap;font-weight:600}
 .reset{font-size:12px;color:var(--soft);background:none;border:0;cursor:pointer;text-decoration:underline;padding:0;align-self:flex-start;font-family:inherit}
 .top{display:flex;justify-content:space-between;align-items:center;gap:8px}.err{color:#c0244f;font-size:14px}
 input[type=password]{font-size:16px;padding:10px;border:1px solid var(--line);border-radius:8px;width:100%;margin:10px 0}
@@ -372,12 +374,27 @@ const APP_PAGE = HEAD + `<div class="wrap"><div class="top"><h1>보고프구 월
 <h2>관리자 명단</h2><div class="box"><p class="msg" style="margin-top:0">한 줄에 한 명씩 VRChat 닉네임을 띄어쓰기까지 똑같이 적고 <b>저장</b>을 누르세요. 그 사람 머리 위에 '관리자'가 뜹니다. 빼려면 그 줄을 지우고 저장합니다.</p>
 <textarea id="admins" spellcheck="false" placeholder="불러오는 중"></textarea><div class="row"><button class="btn" id="saveAdmins">저장</button><span class="msg" id="adminsMsg"></span></div></div>
 <h2>액자 사진</h2><p class="msg">월드의 액자에 적힌 번호를 찾아 <b>사진 바꾸기</b>를 누르고 내 컴퓨터의 사진을 고르세요(사진을 칸에 끌어다 놓아도 됩니다). 칸 비율에 맞게 가운데 기준으로 잘립니다.</p>
+<details class="box sizes" open><summary>사진 크기 안내</summary><table><thead><tr><th>위치</th><th>액자 번호</th><th>모양</th><th>권장 크기(픽셀)</th></tr></thead><tbody id="sizes"></tbody></table>
+<p class="msg" style="margin-bottom:0">권장 크기 이상이면 충분합니다. 더 큰 사진은 자동으로 줄이고, 비율이 다르면 가운데 기준으로 잘립니다. 권장 크기보다 많이 작으면 흐리게 보일 수 있습니다.</p></details>
 <div class="grid" id="grid"></div></div>
 <input type="file" id="pick" accept="image/*" hidden>
 <script>
 const $ = (s) => document.querySelector(s);
 let site = "", adminsSha = "", target = null;
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// 흔한 비율이면 그 이름으로(포스터는 A 용지 비율), 아니면 가로:세로 그대로
+function ratioText(w, h)
+{
+  const named = [[1, 1, "1:1"], [16, 9, "16:9"], [9, 16, "9:16"], [3, 2, "3:2"], [2, 3, "2:3"], [4, 3, "4:3"], [3, 4, "3:4"], [1, 1.4142, "1:1.41 (A 용지)"], [1.4142, 1, "1.41:1 (A 용지)"]];
+  for (const [a, b, name] of named)
+  {
+    if (Math.abs(Math.log((w / h) / (a / b))) < 0.02)
+    {
+      return name;
+    }
+  }
+  return w + ":" + h;
+}
 async function call(path, opts)
 {
   const r = await fetch(path, opts);
@@ -399,8 +416,27 @@ async function load()
   site = s.site; adminsSha = s.adminsSha;
   $("#admins").value = s.admins.join("\\n"); $("#admins").placeholder = "예) 보고프구관리자";
   const t = Math.floor(Date.now() / 60000);
+  // 크기 안내: 이어진 번호 중 위치와 크기가 같은 칸을 한 줄로 묶는다(1~3번 방처럼 크기만 같은 방도 묶는다)
+  const rows = [], room = /^(\\d+)번 방$/;
+  for (const f of s.frames)
+  {
+    const last = rows[rows.length - 1];
+    if (last && last.w === f.w && last.h === f.h && (last.label === f.label || (room.test(last.label) && room.test(f.label))))
+    {
+      last.to = f.n; last.last = f.label;
+    }
+    else
+    {
+      rows.push({ label: f.label, last: f.label, from: f.n, to: f.n, w: f.w, h: f.h, shape: f.shape });
+    }
+  }
+  $("#sizes").innerHTML = rows.map((r) =>
+  {
+    const where = r.last !== r.label ? r.label.match(room)[1] + "~" + r.last.match(room)[1] + "번 방" : r.label;
+    return "<tr><td>" + esc(where) + "</td><td>" + esc(r.from === r.to ? r.from + "번" : r.from + "~" + r.to + "번") + "</td><td>" + esc(r.shape.replace(" 사진", "") + " " + ratioText(r.w, r.h)) + '</td><td class="px">' + r.w + " × " + r.h + "</td></tr>";
+  }).join("");
   // 그림 칸을 액자 비율로 잘라 보여 줘서 월드에서 어디가 잘릴지 미리 보이게 한다
-  $("#grid").innerHTML = s.frames.map((f) => '<div class="card" data-n="' + esc(f.n) + '"><div class="pic"><img style="aspect-ratio:' + Number(f.ratio) + ";width:min(100%," + Math.round(130 * f.ratio) + 'px)" src="' + site + "thumbs/" + esc(f.n) + ".jpg?t=" + t + '" alt=""></div><div class="num">' + esc(f.n) + '번</div><div class="where">' + esc(f.label) + " · " + esc(f.shape) + '</div><button class="btn pick">사진 바꾸기</button><button class="reset">번호 그림으로 되돌리기</button><div class="msg"></div></div>').join("");
+  $("#grid").innerHTML = s.frames.map((f) => '<div class="card" data-n="' + esc(f.n) + '"><div class="pic"><img style="aspect-ratio:' + Number(f.ratio) + ";width:min(100%," + Math.round(130 * f.ratio) + 'px)" src="' + site + "thumbs/" + esc(f.n) + ".jpg?t=" + t + '" alt=""></div><div class="num">' + esc(f.n) + '번</div><div class="where">' + esc(f.label) + " · " + esc(f.shape) + '</div><div class="size">권장 ' + f.w + " × " + f.h + " · " + ratioText(f.w, f.h) + '</div><button class="btn pick">사진 바꾸기</button><button class="reset">번호 그림으로 되돌리기</button><div class="msg"></div></div>').join("");
   for (const img of document.querySelectorAll(".card img"))
   {
     img.onerror = () => { img.style.visibility = "hidden"; };
