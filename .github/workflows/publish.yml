@@ -1,0 +1,47 @@
+# 저장소에 무언가 올라오면 사진을 칸 크기에 맞추고 관리자 명단과 함께 GitHub Pages(월드가 받아 가는 주소)에 올린다
+name: 월드에 반영
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 그림 도구 설치
+        run: |
+          pip install pillow==11.1.0
+          pip install pillow-heif==0.21.0 || echo "heic 지원 없이 진행합니다"
+      - name: 사진 맞추기와 목록 만들기
+        run: python tools/build.py
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
