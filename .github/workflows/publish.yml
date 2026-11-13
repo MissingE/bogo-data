@@ -30,7 +30,7 @@ jobs:
           pip install pillow==11.1.0
           pip install pillow-heif==0.21.0 || echo "heic 지원 없이 진행합니다"
       - name: 사진 맞추기와 목록 만들기
-        run: python tools/build.py
+        run: python .github/bogo/build.py
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
