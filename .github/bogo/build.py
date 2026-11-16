@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -263,7 +264,8 @@ def main():
     text = admins_src.read_text(encoding="utf-8-sig") if admins_src.exists() else ""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     (OUT / "admins.txt").write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
-    admins = [l.strip() for l in text.split("\n") if l.strip() and not l.strip().startswith("#")]
+    # 맥에서 고친 이름(NFD 한글)도 VRChat 표시 이름(NFC)과 같게 비교되도록 정규화한다
+    admins = [unicodedata.normalize("NFC", l.strip()) for l in text.split("\n") if l.strip() and not l.strip().startswith("#")]
 
     world, sheet_count = sheets(slots, built, blank, notes)
     (OUT / "world.txt").write_text("\n".join([WORLD_HEAD] + [f"a {a}" for a in admins] + world) + "\n", encoding="utf-8")
