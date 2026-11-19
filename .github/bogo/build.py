@@ -3,7 +3,8 @@
 GitHub Actions(.github/workflows/publish.yml)가 저장소에 무언가 올라올 때마다 실행한다.
 images 폴더의 사진(파일 이름 = 액자 번호)을 칸(.github/bogo/slots.json) 비율로 가운데를 잘라 맞춘다.
 VRChat은 사진을 5초에 한 장만 받으므로 액자 사진을 2048 판 몇 장(_site/sheets/<판>.jpg)에 모은다.
-월드는 _site/world.txt(관리자 명단, 판 해시, 칸마다 판 안 자리) 하나만 보고 해시가 바뀐 판만 다시 받는다.
+월드는 _site/world.txt(관리자·후원자 명단, 판 해시, 칸마다 판 안 자리) 하나만 보고 해시가 바뀐 판만 다시 받는다.
+후원자 명단(supporters.txt)은 '등급 닉네임' 한 줄에 한 명이고 world.txt에 'd 등급 닉네임'으로 나간다(이 줄을 모르는 예전 월드는 그냥 넘긴다).
 판 배치는 slots.json만으로 정해져 사진을 바꿔도 칸의 판·자리는 그대로다. 스크린 대기 화면은 머티리얼에 통째로 넣으므로 혼자 판 하나를 쓴다.
 판 방식 이전에 올린 월드를 위해 칸마다 한 장씩(_site/images/<번호>.jpg, images.txt, admins.txt)도 계속 만든다.
 사진 하나가 잘못되어도 나머지는 그대로 올리고, 확인할 내용은 실행 요약(Summary)에 적는다.
@@ -41,6 +42,8 @@ SHEET_SCALE = 0.76
 GUTTER = 16
 # 월드에 박아 둔 판 주소 수(월드 BogoRemote.MaxSheets와 같아야 한다)
 MAX_SHEETS = 12
+# 후원자 등급(1부터). 월드 명단판·머리 위 표시도 이 순서를 쓴다
+TIERS = ["빨간지갑", "파란지갑", "은지갑", "금지갑", "다이아몬드 지갑"]
 
 
 def committed_at(path):
@@ -200,6 +203,41 @@ def pick(found, name, notes):
     return files[0]
 
 
+def supporters(notes):
+    """후원자 명단: 한 줄에 '등급 닉네임'(등급은 1~5 숫자나 등급 이름). 같은 이름이 또 나오면 높은 등급 하나만 둔다."""
+    src = ROOT / "supporters.txt"
+    if not src.exists():
+        return []
+    text = src.read_text(encoding="utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+    out, seen = [], {}
+    names = sorted(((t, i + 1) for i, t in enumerate(TIERS)), key=lambda x: -len(x[0]))
+    for n, raw in enumerate(text.split("\n"), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        tier, name = 0, ""
+        head, _, rest = line.partition(" ")
+        if head in ("1", "2", "3", "4", "5"):
+            tier, name = int(head), rest
+        else:
+            for label, k in names:
+                if line.startswith(label + " "):
+                    tier, name = k, line[len(label) + 1:]
+                    break
+        name = unicodedata.normalize("NFC", name.strip())
+        if tier == 0 or not name:
+            notes.append((src, f"{n}번째 줄 `{line}`을 읽지 못했습니다. `등급 닉네임`(예: `5 닉네임` 또는 `금지갑 닉네임`)으로 적어 주세요"))
+            continue
+        key = name.lower()
+        if key in seen:
+            seen[key][0] = max(seen[key][0], tier)
+            continue
+        item = [tier, name]
+        seen[key] = item
+        out.append(item)
+    return out
+
+
 def main():
     data = json.loads((Path(__file__).resolve().parent / "slots.json").read_text(encoding="utf-8"))
     slots = data["slots"]
@@ -267,8 +305,9 @@ def main():
     # 맥에서 고친 이름(NFD 한글)도 VRChat 표시 이름(NFC)과 같게 비교되도록 정규화한다
     admins = [unicodedata.normalize("NFC", l.strip()) for l in text.split("\n") if l.strip() and not l.strip().startswith("#")]
 
+    sups = supporters(notes)
     world, sheet_count = sheets(slots, built, blank, notes)
-    (OUT / "world.txt").write_text("\n".join([WORLD_HEAD] + [f"a {a}" for a in admins] + world) + "\n", encoding="utf-8")
+    (OUT / "world.txt").write_text("\n".join([WORLD_HEAD] + [f"a {a}" for a in admins] + [f"d {t} {n}" for t, n in sups] + world) + "\n", encoding="utf-8")
 
     # 월드 데이터 관리 페이지(비밀번호 페이지, worker.js)가 보여 줄 작은 그림. 공개 주소에는 관리 화면을 두지 않는다
     (OUT / "thumbs").mkdir()
@@ -286,7 +325,8 @@ def main():
                 pass
     (OUT / "robots.txt").write_text("User-agent: *\nDisallow: /\n", encoding="utf-8")
 
-    summary = [f"## 월드에 나가는 내용", f"- 관리자 {len(admins)}명: {', '.join(admins) if admins else '없음'}", f"- 사진 {len(lines) - 1}칸 / 전체 {len(slots)}칸 (폴라로이드 10장은 한 칸으로 셉니다)", f"- 사진 판 {sheet_count}장 (월드는 판을 5초에 한 장씩, 가까운 판부터 받습니다)", ""]
+    per_tier = ", ".join(f"{TIERS[k - 1]} {sum(1 for t, _ in sups if t == k)}" for k in range(len(TIERS), 0, -1) if any(t == k for t, _ in sups))
+    summary = [f"## 월드에 나가는 내용", f"- 관리자 {len(admins)}명: {', '.join(admins) if admins else '없음'}", f"- 후원자 {len(sups)}명" + (f" ({per_tier})" if per_tier else ""), f"- 사진 {len(lines) - 1}칸 / 전체 {len(slots)}칸 (폴라로이드 10장은 한 칸으로 셉니다)", f"- 사진 판 {sheet_count}장 (월드는 판을 5초에 한 장씩, 가까운 판부터 받습니다)", ""]
     if rows:
         summary += ["| 칸 | 올린 파일 | 처리 |", "|---|---|---|"]
         summary += [f"| `{n}` | `{p.relative_to(ROOT)}` | {d} |" for n, p, d in rows]

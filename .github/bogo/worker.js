@@ -1,5 +1,5 @@
 // 보고프구 월드 데이터 관리 페이지(Cloudflare Worker)
-// 비밀번호로 들어와 관리자 명단과 액자 사진을 바꾼다. 바꾸면 bogo-data 저장소에 커밋되고, 저장소의 자동 반영이 1~2분 뒤 월드가 받는 주소에 올린다
+// 비밀번호로 들어와 관리자 명단, 후원자 명단(등급 포함), 액자 사진을 바꾼다. 바꾸면 bogo-data 저장소에 커밋되고, 저장소의 자동 반영이 1~2분 뒤 월드가 받는 주소에 올린다
 // 이 Worker의 Settings → Variables and Secrets에 비밀 값 두 개가 있어야 한다
 //   GITHUB_TOKEN   : bogo-data 저장소의 Contents 읽기·쓰기 토큰
 //   ADMIN_PASSWORD : 이 페이지 비밀번호. 바꾸면 들어와 있던 사람도 모두 새 비밀번호를 넣어야 한다
@@ -7,6 +7,9 @@
 const REPO = "MissingE/bogo-data", BRANCH = "main", SITE = "https://missinge.github.io/bogo-data/";
 const COOKIE = "bogo_s", DAYS = 30, MAX_B64 = 16 * 1024 * 1024, MAX_NAMES = 300;
 const ADMIN_HEAD = "# 한 줄에 한 명씩 VRChat 닉네임을 적으세요. '#'으로 시작하는 줄은 무시됩니다.\n";
+// 후원자 등급(1부터). 저장소 build.py와 월드 명단판이 같은 순서를 쓴다
+const TIERS = ["빨간지갑", "파란지갑", "은지갑", "금지갑", "다이아몬드 지갑"], MAX_SUPPORTERS = 1000;
+const SUP_HEAD = "# 후원자 명단. 한 줄에 한 명: 등급, 띄어쓰기 한 칸, VRChat 닉네임(띄어쓰기까지 똑같이)\n# 등급은 숫자나 이름으로 적습니다: 1 빨간지갑, 2 파란지갑, 3 은지갑, 4 금지갑, 5 다이아몬드 지갑\n# 예) 5 닉네임   또는   금지갑 닉네임\n# '#'으로 시작하는 줄은 무시됩니다. 관리 페이지에서 고치면 이 파일이 바뀝니다.\n";
 const enc = new TextEncoder();
 
 export default {
@@ -43,6 +46,10 @@ export default {
       if (path === "/api/admins" && method === "PUT")
       {
         return await saveAdmins(req, env);
+      }
+      if (path === "/api/supporters" && method === "PUT")
+      {
+        return await saveSupporters(req, env);
       }
       const photo = path.match(/^\/api\/photo\/(\d+)$/), reset = path.match(/^\/api\/reset\/(\d+)$/);
       if (photo && method === "PUT")
@@ -253,9 +260,86 @@ async function known(env, n)
 // ---------------------------------------------------------------- 페이지가 부르는 곳
 async function state(env)
 {
-  const [list, admins] = await Promise.all([frames(env), getFile(env, "admins.txt")]);
+  const [list, admins, sups] = await Promise.all([frames(env), getFile(env, "admins.txt"), getFile(env, "supporters.txt")]);
   const names = admins ? text64(admins.content).split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")) : [];
-  return json({ frames: list, admins: names, adminsSha: admins ? admins.sha : "", site: SITE });
+  return json({ frames: list, admins: names, adminsSha: admins ? admins.sha : "", supporters: sups ? readSupporters(text64(sups.content)) : [], supportersSha: sups ? sups.sha : "", tiers: TIERS, site: SITE });
+}
+
+// 'n 닉네임'(n은 1~5) 또는 '등급이름 닉네임'. 읽지 못하는 줄은 페이지에 보이지 않는다(저장하면 빠진다)
+function readSupporters(text)
+{
+  const out = [], byLen = TIERS.map((t, i) => [t, i + 1]).sort((a, b) => b[0].length - a[0].length);
+  for (const raw of text.split("\n"))
+  {
+    const line = raw.trim();
+    if (!line || line.startsWith("#"))
+    {
+      continue;
+    }
+    let m = line.match(/^([1-5])\s+(.+)$/), tier = 0, name = "";
+    if (m)
+    {
+      tier = Number(m[1]); name = m[2].trim();
+    }
+    else
+    {
+      for (const [label, k] of byLen)
+      {
+        if (line.startsWith(label + " "))
+        {
+          tier = k; name = line.slice(label.length + 1).trim();
+          break;
+        }
+      }
+    }
+    if (tier && name)
+    {
+      out.push({ tier, name });
+    }
+  }
+  return out;
+}
+
+// 같은 이름(영어 대소문자 무시)이 또 있으면 높은 등급 하나만 남긴다. 순서는 페이지에 적힌 대로(월드 명단판은 등급 순으로 다시 늘어놓는다)
+async function saveSupporters(req, env)
+{
+  const body = await req.json(), seen = new Map(), list = [];
+  for (const raw of Array.isArray(body.list) ? body.list : [])
+  {
+    const tier = Math.round(Number(raw && raw.tier)), name = String((raw && raw.name) || "").replace(/[\r\n\t]/g, " ").trim().slice(0, 100);
+    if (!name || name.startsWith("#") || !(tier >= 1 && tier <= TIERS.length))
+    {
+      continue;
+    }
+    const key = name.toLowerCase();
+    if (seen.has(key))
+    {
+      seen.get(key).tier = Math.max(seen.get(key).tier, tier);
+      continue;
+    }
+    if (list.length >= MAX_SUPPORTERS)
+    {
+      break;
+    }
+    const item = { tier, name };
+    seen.set(key, item);
+    list.push(item);
+  }
+  const put = { message: "후원자 명단 수정", branch: BRANCH, content: b64(enc.encode(SUP_HEAD + list.map((x) => x.tier + " " + x.name).join("\n") + (list.length ? "\n" : ""))) };
+  if (body.sha)
+  {
+    put.sha = String(body.sha);
+  }
+  const r = await gh(env, "/contents/supporters.txt", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(put) });
+  if (r.status === 409 || r.status === 422)
+  {
+    return json({ error: "그 사이 다른 사람이 후원자 명단을 바꿨습니다. 새로고침한 뒤 다시 고쳐 주세요" }, 409);
+  }
+  if (!r.ok)
+  {
+    throw await fail(r);
+  }
+  return json({ ok: true, count: list.length, sha: (await r.json()).content.sha });
 }
 
 async function saveAdmins(req, env)
@@ -358,6 +442,12 @@ textarea{width:100%;min-height:150px;font-size:15px;line-height:1.5;padding:10px
 .reset{font-size:12px;color:var(--soft);background:none;border:0;cursor:pointer;text-decoration:underline;padding:0;align-self:flex-start;font-family:inherit}
 .top{display:flex;justify-content:space-between;align-items:center;gap:8px}.err{color:#c0244f;font-size:14px}
 input[type=password]{font-size:16px;padding:10px;border:1px solid var(--line);border-radius:8px;width:100%;margin:10px 0}
+.sups{display:flex;flex-direction:column;gap:6px}.sup{display:flex;gap:8px;align-items:center}
+.sup .name{flex:1;min-width:0;font-size:15px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-family:inherit}
+select{font-size:14px;padding:7px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);font-family:inherit}
+.dot{width:14px;height:14px;border-radius:50%;flex:none;box-shadow:inset 0 0 0 1px #0002}.t1{background:#e64a5c}.t2{background:#4f8df5}.t3{background:linear-gradient(#eef1f6,#9aa3b2)}.t4{background:linear-gradient(#ffe07a,#d6941c)}.t5{background:linear-gradient(135deg,#e6fbff,#86a8ff)}
+.del{border:0;background:none;color:var(--soft);cursor:pointer;text-decoration:underline;font-size:13px;font-family:inherit;padding:4px}
+.bulk{margin-top:12px}.bulk summary{cursor:pointer;font-size:14px;color:var(--soft)}.bulk textarea{min-height:90px;margin-top:8px}.tiers{font-size:13px;color:var(--soft);display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 10px}.tiers span{display:flex;gap:5px;align-items:center}
 </style>`;
 
 function loginPage(error)
@@ -373,6 +463,11 @@ const APP_PAGE = HEAD + `<div class="wrap"><div class="top"><h1>보고프구 월
 <p class="msg">바꾼 내용은 1~2분 뒤 월드에 반영됩니다. 월드를 다시 올릴 필요는 없습니다.</p>
 <h2>관리자 명단</h2><div class="box"><p class="msg" style="margin-top:0">한 줄에 한 명씩 VRChat 닉네임을 띄어쓰기까지 똑같이 적고 <b>저장</b>을 누르세요. 그 사람 머리 위에 '관리자'가 뜹니다. 빼려면 그 줄을 지우고 저장합니다.</p>
 <textarea id="admins" spellcheck="false" placeholder="불러오는 중"></textarea><div class="row"><button class="btn" id="saveAdmins">저장</button><span class="msg" id="adminsMsg"></span></div></div>
+<h2>후원자 명단</h2><div class="box"><p class="msg" style="margin-top:0">VRChat 닉네임을 띄어쓰기까지 똑같이 적고 등급을 고른 뒤 <b>저장</b>을 누르세요. 그 사람 머리 위에 등급 색 '후원자'가 뜨고(관리자이면 '관리자' 옆에 나란히), 1층 왼쪽 계단 아래 후원자 명단판에 높은 등급부터 올라갑니다.</p>
+<div class="tiers" id="tierLegend"></div><div class="sups" id="sups"><p class="msg">불러오는 중</p></div>
+<div class="row"><button class="btn sub" id="addSup">한 명 추가</button></div>
+<details class="bulk"><summary>여러 명 한 번에 넣기</summary><textarea id="bulk" spellcheck="false" placeholder="한 줄에 한 명씩 닉네임"></textarea><div class="row"><select id="bulkTier"></select><button class="btn sub" id="bulkAdd">목록에 넣기</button></div></details>
+<div class="row"><button class="btn" id="saveSups">저장</button><span class="msg" id="supsMsg"></span></div></div>
 <h2>액자 사진</h2><p class="msg">월드의 액자에 적힌 번호를 찾아 <b>사진 바꾸기</b>를 누르고 내 컴퓨터의 사진을 고르세요(사진을 칸에 끌어다 놓아도 됩니다). 칸 비율에 맞게 가운데 기준으로 잘립니다.</p>
 <details class="box sizes" open><summary>사진 크기 안내</summary><table><thead><tr><th>위치</th><th>액자 번호</th><th>모양</th><th>권장 크기(픽셀)</th></tr></thead><tbody id="sizes"></tbody></table>
 <p class="msg" style="margin-bottom:0">권장 크기 이상이면 충분합니다. 더 큰 사진은 자동으로 줄이고, 비율이 다르면 가운데 기준으로 잘립니다. 권장 크기보다 많이 작으면 흐리게 보일 수 있습니다.</p></details>
@@ -380,7 +475,7 @@ const APP_PAGE = HEAD + `<div class="wrap"><div class="top"><h1>보고프구 월
 <input type="file" id="pick" accept="image/*" hidden>
 <script>
 const $ = (s) => document.querySelector(s);
-let site = "", adminsSha = "", target = null;
+let site = "", adminsSha = "", target = null, tiers = [], sups = [], supsSha = "";
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 // 흔한 비율이면 그 이름으로(포스터는 A 용지 비율), 아니면 가로:세로 그대로
 function ratioText(w, h)
@@ -415,6 +510,10 @@ async function load()
   const s = await call("/api/state");
   site = s.site; adminsSha = s.adminsSha;
   $("#admins").value = s.admins.join("\\n"); $("#admins").placeholder = "예) 보고프구관리자";
+  tiers = s.tiers || []; sups = s.supporters || []; supsSha = s.supportersSha || "";
+  $("#tierLegend").innerHTML = tiers.map((t, i) => '<span><i class="dot t' + (i + 1) + '"></i>' + esc(t) + "</span>").join("");
+  $("#bulkTier").innerHTML = tierOptions(1);
+  drawSups();
   const t = Math.floor(Date.now() / 60000);
   // 크기 안내: 이어진 번호 중 위치와 크기가 같은 칸을 한 줄로 묶는다(1~3번 방처럼 크기만 같은 방도 묶는다)
   const rows = [], room = /^(\\d+)번 방$/;
@@ -455,6 +554,76 @@ $("#saveAdmins").onclick = async () =>
   catch (e)
   {
     $("#adminsMsg").textContent = e.message;
+  }
+  b.disabled = false;
+};
+function tierOptions(sel)
+{
+  return tiers.map((t, i) => '<option value="' + (i + 1) + '"' + (sel === i + 1 ? " selected" : "") + ">" + esc(t) + "</option>").join("");
+}
+function drawSups()
+{
+  $("#sups").innerHTML = sups.length ? sups.map((x) => '<div class="sup"><i class="dot t' + x.tier + '"></i><select class="tier">' + tierOptions(x.tier) + '</select><input class="name" maxlength="100" spellcheck="false" placeholder="VRChat 닉네임" value="' + esc(x.name) + '"><button class="del">빼기</button></div>').join("") : '<p class="msg">아직 후원자가 없습니다. 한 명 추가를 누르세요.</p>';
+}
+function readSups()
+{
+  sups = [...document.querySelectorAll("#sups .sup")].map((r) => ({ tier: Number(r.querySelector(".tier").value), name: r.querySelector(".name").value }));
+}
+$("#sups").onchange = (ev) =>
+{
+  const row = ev.target.closest(".sup");
+  if (row && ev.target.classList.contains("tier"))
+  {
+    row.querySelector(".dot").className = "dot t" + ev.target.value;
+  }
+};
+$("#sups").onclick = (ev) =>
+{
+  if (!ev.target.classList.contains("del"))
+  {
+    return;
+  }
+  const rows = [...document.querySelectorAll("#sups .sup")], at = rows.indexOf(ev.target.closest(".sup"));
+  readSups();
+  if (at >= 0)
+  {
+    sups.splice(at, 1);
+  }
+  drawSups();
+};
+$("#addSup").onclick = () =>
+{
+  readSups(); sups.push({ tier: 1, name: "" }); drawSups();
+  const last = [...document.querySelectorAll("#sups .name")].pop();
+  if (last)
+  {
+    last.focus();
+  }
+};
+$("#bulkAdd").onclick = () =>
+{
+  readSups();
+  const tier = Number($("#bulkTier").value);
+  for (const n of $("#bulk").value.split("\\n").map((x) => x.trim()).filter(Boolean))
+  {
+    sups.push({ tier, name: n });
+  }
+  $("#bulk").value = ""; drawSups();
+};
+$("#saveSups").onclick = async () =>
+{
+  const b = $("#saveSups"); b.disabled = true; $("#supsMsg").textContent = "저장하는 중";
+  try
+  {
+    readSups();
+    const list = sups.map((x) => ({ tier: x.tier, name: x.name.trim() })).filter((x) => x.name);
+    const j = await call("/api/supporters", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ list, sha: supsSha }) });
+    supsSha = j.sha;
+    $("#supsMsg").textContent = j.count + "명 저장했습니다. 1~2분 뒤 월드에 반영됩니다.";
+  }
+  catch (e)
+  {
+    $("#supsMsg").textContent = e.message;
   }
   b.disabled = false;
 };
